@@ -56,6 +56,12 @@ def preprocess_data(data, local_window_size, splitter, tokenizer):
                 # TODO: Select a subset of token_ids from idx -> idx + local_window_size as input and put it to x
                 # Select a subset of token_ids from idx -> idx + local_window_size as input and put it to x: list of context token_ids
                 # Then select the word immediately after this window as output and put it to y: the target next token_id
+                x = token_ids[idx: idx + local_window_size] # list of context token_ids
+                y = token_ids[idx + local_window_size] # the token right after the window 
+
+                # append to x_data and y_data 
+                x_data.append(x)
+                y_data.append(y)
 
     # making tensors
     x_data = torch.LongTensor(x_data)
@@ -81,12 +87,19 @@ class NPLMFirstBlock(nn.Module):
         # looking up the word embeddings from self.embeddings()
         # And concatenating them
         # Note this is done for a batch of instances.
+        embeds = self.embeddings(inputs)
+        # embeds = embeds.reshape(inputs.size(0), -1)
+        embeds = embeds.reshape(-1, self.local_window_size * self.embed_dim)
 
         # Transform embeddings with a linear layer and tanh activation
+        hidden = torch.tanh(self.linear(embeds))
 
         # apply layer normalization
+        normed = self.layer_norm(hidden)
 
         # apply dropout
+        final_embeds = self.dropout(normed)
+
         # your code ends here
 
         return final_embeds
@@ -104,12 +117,16 @@ class NPLMBlock(nn.Module):
     def forward(self, inputs):
         # TODO: implement the forward pass
         # apply linear transformation and tanh activation
+        hidden = torch.tanh(self.linear(inputs))
 
         # add residual connection
+        residual = hidden + inputs
 
         # apply layer normalization
+        normed = self.layer_norm(residual)
 
         # apply dropout
+        final_inputs = self.dropout(normed)
 
         # your code ends here
 
@@ -125,9 +142,10 @@ class NPLMFinalBlock(nn.Module):
     def forward(self, inputs):
         # TODO: implement the forward pass
         # apply linear transformation
-
+        logits = self.linear(inputs)
 
         # apply log_softmax to get log-probabilities (logits)
+        log_probs = F.log_softmax(logits, dim=1)
 
         # your code ends here
 
@@ -143,6 +161,8 @@ class NPLM(nn.Module):
         self.intermediate_layers = nn.ModuleList()
 
         # TODO: create num_blocks of NPLMBlock as intermediate layers
+        for _ in range(num_blocks): # add num_blocks of NPLMBlock layers to the intermediate layers
+            self.intermediate_layers.append(NPLMBlock(hidden_dim,dropout_p))
 
         # your code ends here
 
@@ -151,13 +171,15 @@ class NPLM(nn.Module):
     def forward(self, inputs):
         # TODO: implement the forward pass
         # input layer
-
+        hidden = self.first_layer(inputs)
 
         # multiple middle layers
         # remember to apply the ReLU activation function after each layer
-
+        for layer in self.intermediate_layers:
+            hidden = F.relu(layer(hidden))
 
         # output layer
+        log_probs = self.final_layer(hidden)
 
         # your code ends here
 
@@ -204,9 +226,16 @@ def train(model, train_dataloader, dev_dataloader, criterion, optimizer, schedul
             # TODO extract perplexity
             # remember the connection between perplexity and cross-entropy loss
             # name the perplexity result as 'ppl'
+            # perplexity is just exp(cross-entropy loss)
+            # it isn't 2^H like in the class becuse we are using natural log, not base 2
+            ppl = torch.exp(loss)
 
 
             # backward pass and update gradient
+            optimizer.zero_grad() # clear left over gradients 
+            loss.backward() # backpropagation 
+            optimizer.step() # update weights 
+            scheduler.step() # update the lr 
 
 
             train_losses.append(loss.item())
@@ -250,6 +279,7 @@ def evaluate(model, eval_dataloader, criterion):
     avg_loss = loss / count
     # TODO: compute perplexity
     # name the perplexity result as 'avg_ppl'
+    avg_ppl = np.exp(avg_loss)
 
     return avg_loss, avg_ppl
 
@@ -345,7 +375,12 @@ def sample_from_mlp_lm(config, dev_data):
     model = NPLM(tokenizer.vocab_size, config.embed_dim, config.local_window_size, config.hidden_dim, config.num_blocks,
                  config.dropout_p)
     print(f"{'-' * 10} Load Model Weights {'-' * 10}")
-    model.load_state_dict(torch.load(config.save_path))
+    # modified this line to accomodate the fact that I'm not running on a device with a GPU/cuda
+    # model.load_state_dict(torch.load(config.save_path))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.load_state_dict(torch.load(config.save_path, map_location=device))
+    model.to(device)
+
     model.eval()
 
     print(f"{'-' * 10} Evaluate on the Dev Set {'-' * 10}")
